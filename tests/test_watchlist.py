@@ -59,7 +59,9 @@ class MockQuotes(BaseHTTPRequestHandler):
         origin_quota = scenario == "originquota"
         free = scenario.startswith("free") or (scenario == "unknownbasic" and len(self.calls[scenario]) > 5)
         error = endpoint == "indices" and scenario == "indiceserror"
-        self.send_response(502 if error else 429 if quota or limited else 200)
+        auth = re.fullmatch(r"auth-(quotes|indices)-(bare|gateway)(-later|-empty)?-(401|403)", scenario)
+        auth_error = auth and endpoint == auth[1] and (not auth[3] or len(self.requests[scenario]) > 1)
+        self.send_response(int(auth[4]) if auth_error else 502 if error else 429 if quota or limited else 200)
         self.send_header("Content-Type", "application/json")
         if not origin_quota and (not scenario.startswith("unknown") or free):
             self.send_header("X-Ratelimit-Requests-Limit", "5" if free else "100000")
@@ -70,6 +72,11 @@ class MockQuotes(BaseHTTPRequestHandler):
             self.send_header("X-RateLimit-Remaining", "0")
             self.send_header("X-RateLimit-Reset", "1")
         self.end_headers()
+        if auth_error:
+            body = (json.dumps({"message": "Synthetic rejected key"}).encode() if auth[2] == "gateway"
+                    else b"" if auth[4] == "401" else b"<html>Forbidden</html>")
+            self.wfile.write(body)
+            return
         if origin_quota:
             body = {"data": {}, "error": "daily quota exceeded"}
         elif error:
@@ -78,6 +85,8 @@ class MockQuotes(BaseHTTPRequestHandler):
             body = {"message": "Per-second quota exceeded; retry in one second"}
         elif quota or limited:
             body = {"message": "Synthetic quota exhausted" if quota else "Synthetic rate limit: 5 requests/second"}
+        elif auth and auth[3] == "-empty" and endpoint == "quotes":
+            body = {"data": {}}
         elif endpoint == "indices":
             body = {"data": {s: {
                 "price": {"DJI": 42000, "SPX": 5700, "NDX": 20000, "RUT": 2200, "VIX": 18.4}[s],
@@ -644,6 +653,57 @@ class WatchlistTests(unittest.TestCase):
                             for h in MockQuotes.headers_seen["keypresent"]))
         self.assertEqual(displayed(tree), SYMBOLS[:5])
         self.assertNotIn(UPGRADE_URL, texts(tree))
+
+    def test_bare_auth_errors_show_key_rejected_and_retain_claims(self):
+        for endpoint in ("quotes", "indices"):
+            for status in (401, 403):
+                with self.subTest(endpoint=endpoint, status=status):
+                    scenario = "auth-%s-bare-%d" % (endpoint, status)
+                    tree, = self.render(scenario, 5, symbols="123,!" if endpoint == "indices" else None,
+                                        show_indices=endpoint == "indices", state={"fake_now_et": "2026-11-02T21:00"})
+                    self.assertEqual(texts(tree), ["KEY REJECTED", "Wrong key or", "not subscribed", "rapidapi.com"])
+                    self.assertEqual(MockQuotes.requests[scenario], [(endpoint, INDEX_SYMBOLS if endpoint == "indices" else SYMBOLS[:5])])
+                    self.assertEqual(self.last_cache_writes.count("cold"), 1)  # no release write
+
+    def test_gateway_auth_errors_show_key_rejected_and_release_claims(self):
+        for endpoint, plan in (("quotes", "0"), ("quotes", "5"), ("indices", "0")):
+            for status in (401, 403):
+                with self.subTest(endpoint=endpoint, plan=plan, status=status):
+                    scenario = "auth-%s-gateway-%d" % (endpoint, status)
+                    trees = self.render(scenario, 5, renders=2, symbols="123,!" if endpoint == "indices" else None,
+                                        show_indices=endpoint == "indices",
+                                        state={"fake_now_et": "2026-11-02T21:00", "plan_limit": plan})
+                    for tree in trees:
+                        self.assertEqual(texts(tree), ["KEY REJECTED", "Wrong key or", "not subscribed", "rapidapi.com"])
+                    if plan == "5":
+                        self.assertEqual(self.last_cache_writes.count("slot"), 4)
+                        self.assertEqual(self.last_cache_writes.count("calls"), 4)
+                    else:
+                        self.assertEqual(self.last_cache_writes.count("cold"), 4)
+
+    def test_auth_errors_after_quotes_keep_data_and_stop_requests(self):
+        for endpoint in ("quotes", "indices"):
+            for kind in ("bare", "gateway"):
+                for status in (401, 403):
+                    with self.subTest(endpoint=endpoint, kind=kind, status=status):
+                        scenario = "auth-%s-%s-later-%d" % (endpoint, kind, status)
+                        tree, = self.render(scenario, 20, show_indices=endpoint == "indices",
+                                            state={"fake_now_et": "2026-11-02T21:00"})
+                        self.assertEqual(displayed(tree), SYMBOLS[:10 if endpoint == "quotes" else 5])
+                        self.assertEqual(set(self.last_saves[-1]) - {"_old"}, set(SYMBOLS[:5]))
+                        self.assertNotIn("KEY REJECTED", texts(tree))
+                        self.assertEqual(len(MockQuotes.requests[scenario]), 2)
+                        self.assertEqual(self.last_cache_writes.count("cold"), 1)
+
+    def test_gateway_auth_error_after_fresh_empty_quotes_retains_claims(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                scenario = "auth-indices-gateway-empty-%d" % status
+                tree, = self.render(scenario, 20, show_indices=True,
+                                    state={"fake_now_et": "2026-11-02T21:00"})
+                self.assertEqual(texts(tree), ["KEY REJECTED", "Wrong key or", "not subscribed", "rapidapi.com"])
+                self.assertEqual(MockQuotes.requests[scenario], [("quotes", SYMBOLS[:5]), ("indices", INDEX_SYMBOLS)])
+                self.assertEqual(self.last_cache_writes.count("cold"), 1)  # the fresh 200 spent the claim
 
     def test_quota_marquee_keeps_encoded_ticker_and_indices_pages(self):
         for plan in ("paid", "unknown"):

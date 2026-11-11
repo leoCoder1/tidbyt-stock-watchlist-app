@@ -138,6 +138,8 @@ class HTTP:
         self.status_override = None
         self.body_overrides = {}
         self.header_overrides = {}
+        self.raw_responses = {}
+        self.cache_errors = False
 
     def get(self, url, params, headers, ttl_seconds):
         parsed = urlsplit(url)
@@ -151,7 +153,7 @@ class HTTP:
         cache_key = (endpoint, tuple(symbols))
         if cache_key in self.answers:
             answer = self.answers[cache_key]
-            return SimpleNamespace(status_code=200, headers=dict(answer.headers, **{"Tidbyt-Cache-Status": "HIT"}),
+            return SimpleNamespace(status_code=answer.status_code, headers=dict(answer.headers, **{"Tidbyt-Cache-Status": "HIT"}),
                                    body=answer.body)
         if self.before_request:
             self.before_request(symbols)
@@ -180,10 +182,11 @@ class HTTP:
             body = self.error_body
         if self.body_overrides:
             body.update(self.body_overrides)
+        status, raw_body = self.raw_responses.get(endpoint, (status, json.dumps(body)))
         answer = SimpleNamespace(status_code=status, headers={
             "X-Ratelimit-Requests-Limit": str(self.limit),
             "X-Ratelimit-Requests-Remaining": "0" if quota else "4" if self.limit < 1000 else "90000",
-            "X-Ratelimit-Requests-Reset": "3600"}, body=lambda: json.dumps(body))
+            "X-Ratelimit-Requests-Reset": "3600"}, body=lambda: raw_body)
         if self.remaining is not None:
             answer.headers["X-Ratelimit-Requests-Remaining"] = str(self.remaining)
         if not self.emit_limit:
@@ -191,7 +194,7 @@ class HTTP:
         if not self.emit_headers:
             answer.headers.clear()
         answer.headers.update(self.header_overrides)
-        if status == 200:
+        if status == 200 or self.cache_errors:
             self.answers[cache_key] = answer
         return answer
 
@@ -963,6 +966,12 @@ class LogicTests(unittest.TestCase):
         self.assertIs(fields["show_indices"]["default"], True)
         self.assertEqual(fields["extended"]["kind"], "Toggle")
         self.assertIs(fields["extended"]["default"], False)
+        self.assertEqual({key: field["desc"] for key, field in fields.items()}, {
+            "rapidapi_key": "Your RapidAPI key for US Stock & ETF Prices (free key available).",
+            "symbols": "Comma-separated, up to 100, e.g. SPY,AAPL,BRK.B. Up to 20 tickers per update with indices, 25 without; longer lists rotate.",
+            "show_indices": "Page one shows DOW, S&P, NDX, RUT and VIX; ticker prices start on the next pages. Turn off to show tickers only.",
+            "extended": "Also update 4:15-9:30 and 16:00-20:15 ET with pre-market and after-hours prices.",
+        })
         tokens, more = runtime.env["parse_symbols"](",".join(SYMBOLS + ["EXTRA"]))
         self.assertEqual(tokens, [(s, True) for s in SYMBOLS])
         self.assertEqual(more, 1)
@@ -1075,6 +1084,16 @@ class LogicTests(unittest.TestCase):
         self.assertEqual((ROOT / "publish/tronbyt/apps/stockwatchlist/stock_watchlist.star").read_bytes(),
                          (ROOT / "stock_watchlist.star").read_bytes())
 
+    def test_publication_description_matches_free_key_text(self):
+        manifest = (ROOT / "publish/tronbyt/apps/stockwatchlist/manifest.yaml").read_text()
+        description = " ".join(re.search(r"^desc: >-\n((?:  .*\n)+)", manifest, re.M)[1].split())
+        expected = ("Follow up to 100 US stocks and ETFs with delayed prices and percentage changes. "
+                    "Page one shows the DOW, S&P, NDX, RUT and VIX market indices. Get a free key at "
+                    "https://rapidapi.com/logicione/api/us-stock-etf-prices and paste it in the app settings.")
+        self.assertEqual(description, expected)
+        source = (ROOT / "stock_watchlist.star").read_text()
+        self.assertEqual(re.search(r"^Description: (.*)$", source, re.M)[1], expected)
+
     def test_preview_generator_rejects_live_executable_after_symlink_or_path_resolution(self):
         with tempfile.TemporaryDirectory(prefix=".run-preview-guard-", dir=ROOT / "tests") as scratch:
             work = Path(scratch)
@@ -1166,7 +1185,8 @@ class LogicTests(unittest.TestCase):
                             self.assertNotIn("no data", texts(pages(tree)[0]))
 
     def test_failed_origin_quota_responses_pause_and_notice(self):
-        for status in (200, 429, 403):
+        # Quota wording intentionally takes precedence over KEY REJECTED for 401/403.
+        for status in (200, 429, 401, 403):
             with self.subTest(status=status):
                 runtime = Runtime()
                 runtime.http.emit_headers = False
@@ -1175,6 +1195,7 @@ class LogicTests(unittest.TestCase):
                 tree = runtime.render()
                 self.assertTrue(any(k.startswith("pause:") for k in runtime.cache.values))
                 self.assertTrue(any("USED" in t for t in texts(tree)))
+                self.assertNotIn("KEY REJECTED", texts(tree))
                 self.assertIn(runtime.env["UPGRADE_URL"], texts(tree))
                 self.assertEqual(runtime.state()["page_offset"], "0")
                 self.assertEqual(runtime.state()["plan_limit"], "5")
@@ -1198,6 +1219,95 @@ class LogicTests(unittest.TestCase):
                     self.assertFalse(any("PRO" in t or "QUOTA" in t or "FREE" in t for t in texts(tree)))
                     self.assertNotIn(runtime.env["UPGRADE_URL"], texts(tree))
                 self.assertEqual(len(runtime.http.requests), 2)  # the unbilled burst releases the cold claim
+
+    def test_bare_auth_errors_show_key_rejected_and_retain_claims(self):
+        for endpoint in ("quotes", "indices"):
+            for status, body in ((401, ""), (403, "<html>Forbidden</html>")):
+                with self.subTest(endpoint=endpoint, status=status):
+                    runtime = Runtime()
+                    runtime.http.raw_responses[endpoint] = (status, body)
+                    params = dict(symbols="123,!" if endpoint == "indices" else ",".join(SYMBOLS[:5]),
+                                  show_indices=endpoint == "indices", fake_now_et="2026-11-02T21:00")
+                    tree = runtime.render(**params)
+                    self.assertEqual(texts(tree), ["KEY REJECTED", "Wrong key or", "not subscribed",
+                                                   runtime.env["URL_HINT"]])
+                    self.assertEqual(runtime.http.requests, [(endpoint, INDEX_SYMBOLS if endpoint == "indices" else SYMBOLS[:5])])
+                    claims = [(k, v) for k, v in runtime.cache.writes if k.startswith("cold:")]
+                    self.assertEqual(len(claims), 1)
+                    self.assertEqual(runtime.cache.get(claims[0][0]), "1")
+                    runtime.render(**params)
+                    self.assertEqual(len(runtime.http.requests), 1)
+
+    def test_gateway_auth_errors_show_key_rejected_and_release_claims(self):
+        for endpoint, plan in (("quotes", "0"), ("quotes", "5"), ("indices", "0")):
+            for status in (401, 403):
+                with self.subTest(endpoint=endpoint, plan=plan, status=status):
+                    runtime = Runtime()
+                    runtime.http.raw_responses[endpoint] = (status, json.dumps({"message": "Synthetic rejected key"}))
+                    for _ in range(2):
+                        tree = runtime.render(symbols="123,!" if endpoint == "indices" else ",".join(SYMBOLS[:5]),
+                                              show_indices=endpoint == "indices", plan_limit=plan,
+                                              fake_now_et="2026-11-02T21:00")
+                        self.assertEqual(texts(tree), ["KEY REJECTED", "Wrong key or", "not subscribed",
+                                                       runtime.env["URL_HINT"]])
+                        claims = {k: v for k, v in runtime.cache.values.items()
+                                  if k.startswith(("cold:", "slot:", "calls:"))}
+                        self.assertTrue(claims)
+                        self.assertTrue(all(v == "" for v in claims.values()))
+                    self.assertEqual(len(runtime.http.requests), 2)
+
+    def test_auth_errors_after_quotes_keep_data_and_stop_requests(self):
+        for endpoint in ("quotes", "indices"):
+            for status in (401, 403):
+                for body in ("", json.dumps({"message": "Synthetic rejected key"})):
+                    with self.subTest(endpoint=endpoint, status=status, body=body):
+                        runtime = Runtime()
+                        def reject_later(symbols):
+                            if runtime.http.calls:
+                                runtime.http.raw_responses[endpoint] = (status, body)
+                        runtime.http.before_request = reject_later
+                        tree = runtime.render(show_indices=endpoint == "indices", fake_now_et="2026-11-02T21:00")
+                        self.assertEqual(shown(tree), SYMBOLS[:10 if endpoint == "quotes" else 5])
+                        self.assertEqual(set(runtime.cache.last()) - {"_old"}, set(SYMBOLS[:5]))
+                        self.assertNotIn("KEY REJECTED", texts(tree))
+                        self.assertEqual(len(runtime.http.requests), 2)
+                        claims = [(k, v) for k, v in runtime.cache.writes if k.startswith("cold:")]
+                        self.assertEqual(len(claims), 1)
+                        self.assertEqual(runtime.cache.get(claims[0][0]), "1")
+
+    def test_gateway_auth_error_after_fresh_empty_quotes_retains_claims(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                runtime = Runtime()
+                runtime.http.raw_responses = {
+                    "quotes": (200, json.dumps({"data": {}})),
+                    "indices": (status, json.dumps({"message": "Synthetic rejected key"})),
+                }
+                params = dict(show_indices=True, fake_now_et="2026-11-02T21:00")
+                tree = runtime.render(**params)
+                self.assertEqual(texts(tree), ["KEY REJECTED", "Wrong key or", "not subscribed",
+                                               runtime.env["URL_HINT"]])
+                self.assertEqual(runtime.http.requests, [("quotes", SYMBOLS[:5]), ("indices", INDEX_SYMBOLS)])
+                claims = [(k, v) for k, v in runtime.cache.writes if k.startswith("cold:")]
+                self.assertEqual(len(claims), 1)
+                self.assertEqual(runtime.cache.get(claims[0][0]), "1")
+                runtime.render(**params)
+                self.assertEqual(len(runtime.http.requests), 2)
+
+    def test_cached_gateway_auth_errors_still_show_key_rejected(self):
+        for endpoint in ("quotes", "indices"):
+            for status in (401, 403):
+                with self.subTest(endpoint=endpoint, status=status):
+                    runtime = Runtime()
+                    runtime.http.cache_errors = True
+                    runtime.http.raw_responses[endpoint] = (status, json.dumps({"message": "Synthetic rejected key"}))
+                    for _ in range(2):
+                        tree = runtime.render(symbols="123,!" if endpoint == "indices" else ",".join(SYMBOLS[:5]),
+                                              show_indices=endpoint == "indices", fake_now_et="2026-11-02T21:00")
+                        self.assertEqual(texts(tree), ["KEY REJECTED", "Wrong key or", "not subscribed",
+                                                       runtime.env["URL_HINT"]])
+                    self.assertEqual(len(runtime.http.urls), 2)  # the second render reaches the HTTP cache
+                    self.assertEqual(len(runtime.http.requests), 1)  # only the first render reaches the origin
 
     def test_429_exhausted_plan_budget_pauses_without_quota_wording(self):
         for plan in (0, 100000):
