@@ -1,0 +1,12 @@
+local/
+config/
+*.bak*
+.starcache/
+bin/
+*.webp
+*.gif
+!publish/tronbyt/apps/**/*.webp
+!publish/tronbyt/apps/**/*.gif
+.DS_Store
+/SUMMARY.md
+__pycache__/
