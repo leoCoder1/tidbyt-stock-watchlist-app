@@ -2,41 +2,48 @@
 
 A stock and ETF watchlist for Tidbyt and Tronbyt displays. Follow up to **100 US tickers**, with delayed prices, signed percentage changes, and market indices on page one. The app uses a 64×32 layout and rotates longer watchlists across renders.
 
-## 1. Get a free RapidAPI key
+## Screenshots
 
-Subscribe to **BASIC** at [US Stock & ETF Prices on RapidAPI](https://rapidapi.com/logicione/api/us-stock-etf-prices), then copy your RapidAPI key. BASIC is free and supports the first **5 tickers** with infrequent updates. Most users can stay on the free key. Only users who want more tickers or more frequent updates need a paid plan.
+These screenshots use synthetic/example data, not live quotes. Each 64×32 render is enlarged 10× to 640×320.
 
-| Plan | Price | Requests |
-| --- | --- | --- |
-| BASIC | $0 | Free, infrequent updates |
-| PRO | $9.99/month | See the current plan listing |
-| ULTRA | $29.99/month | 100k requests |
-| MEGA | $79.99/month | 500k requests |
+![Market indices page showing DOW, S&P, NDX, RUT, and VIX with signed changes](docs/images/market-indices.png)
 
-Plans and subscriptions are managed on the [same RapidAPI page](https://rapidapi.com/logicione/api/us-stock-etf-prices). The app detects your plan from response headers; there is no plan dropdown.
+Market indices: signed point changes in the middle and percentage changes on the right.
 
-## 2. Install on Tronbyt
+![Ticker page showing SPY, QQQ, AAPL, MSFT, and NVDA with example prices and percentage changes](docs/images/ticker-page.png)
+
+Ticker page: example prices and signed percentage changes.
+
+![First-run setup screen prompting ADD RAPIDAPI KEY and FREE KEY WORKS, with the signup link starting to scroll](docs/images/add-rapidapi-key.png)
+
+First-run setup: add a free RapidAPI key to get started.
+
+## Get a free RapidAPI key
+
+Get a free key at [US Stock & ETF Prices on RapidAPI](https://rapidapi.com/logicione/api/us-stock-etf-prices), then copy your RapidAPI key. The free plan works.
+
+## Install on Tronbyt
 
 Install **Stock Watchlist** from your Tronbyt community app catalog when available, or sideload the app from `publish/tronbyt/apps/stockwatchlist/` in this repository ([leoCoder1/tidbyt-stock-watchlist-app](https://github.com/leoCoder1/tidbyt-stock-watchlist-app)) using your instance's app import workflow. A pull request to add the app to the public Tronbyt catalog may be open or merged separately.
 
 1. Paste the key into the **RapidAPI key** field.
 2. Enter comma-separated **Tickers**, such as `SPY,QQQ,AAPL,MSFT,NVDA`. The app validates and deduplicates symbols, accepts forms such as `BRK.B`, and caps the list at 100. Invalid symbols appear on screen and are never sent to the quote service.
 3. Leave **Market indices** on, or turn it off for tickers only.
-4. Optionally enable **Pre-market & after hours** for extended-session updates on paid plans.
+4. Optionally enable **Pre-market & after hours** for extended-session updates.
 
-With no key, the app always shows **ADD RAPIDAPI KEY / FREE KEY WORKS**, explains the first-five-ticker allowance, and scrolls the [RapidAPI signup link](https://rapidapi.com/logicione/api/us-stock-etf-prices). It makes **zero API calls** and writes no caches or paging state until a key is entered.
+With no key, the app shows **ADD RAPIDAPI KEY / FREE KEY WORKS**, scrolls the [RapidAPI signup link](https://rapidapi.com/logicione/api/us-stock-etf-prices), and makes **zero API calls**. It writes no caches or paging state until a key is entered.
 
 ## Display and refresh behavior
 
 **Market indices** defaults to on. Page one shows **DOW**, **S&P**, **NDX**, **RUT**, and **VIX**, in that order. Signed point changes occupy the middle column, with signed percent changes on the right. Ticker prices start on the next page, with prices in the middle and percentages on the right. Positive and negative changes use green and red; zero is neutral. Missing point changes fall back to price minus previous close, then `--` when unavailable. There is no CLOSED header or page-number footer.
 
-Each render makes at most five requests, with up to five tickers per quote request. An indices request shares that budget, leaving room for up to 20 tickers; ticker-only renders can fetch up to 25. Longer lists continue on later renders, and shorter display dwells fetch only what fits. An unknown plan initially uses the paid refresh policy until response headers identify it.
+Each render makes at most five requests, with up to five symbols per request. The indices batch shares that budget, leaving room for up to 20 tickers; ticker-only renders can fetch up to 25. Longer lists continue on later renders, and shorter display dwells fetch only what fits.
 
-BASIC displays the first five tickers and uses scheduled ET slots plus a five-call rolling daily guard. It does not spend an extra request on indices; that page uses cached indices or shows no-data rows. On Tronbyt, the persistent HTTP cache holds BASIC responses for **about two hours** (`ttl_seconds=7200`, subject to cache jitter), protecting the free allowance from frequent renders. Keep persistent caching enabled for this protection. Paid responses use a nine-minute HTTP cache and typically refresh every ten minutes. The manifest's recommended interval is ten minutes for both; BASIC's cache and scheduling guards protect its allowance.
+On Tronbyt, keep persistent HTTP caching enabled. Frequent re-renders are not always new API calls; the manifest's recommended interval is ten minutes.
 
-Fresh quotes keep their normal colors when reused between scheduled fetches or served from the HTTP cache. Stale or old quotes, quotes during a BASIC quota pause, and cached indices remain visible and dimmed. With a key set, a fully closed market and no usable cached data or notices can skip rendering. In an active regular or enabled extended session, failed fetches retain a visible no-data or **SERVICE DOWN** fallback. Setup and quota/rate-limit notices stay visible. Market windows include a delayed-data tail; holidays use the existing response-based dormancy detection.
+Fresh quotes keep their normal colors when reused between scheduled fetches or served from the HTTP cache. Stale or old quotes, quotes during a quota pause, and cached indices remain visible and dimmed. With a key set, a fully closed market and no usable cached data or notices can skip rendering. In an active regular or enabled extended session, failed fetches retain a visible no-data or **SERVICE DOWN** fallback. Setup and quota/rate-limit notices stay visible. Market windows include a delayed-data tail; holidays use the existing response-based dormancy detection.
 
-Quota and upgrade notices appear only after a real rate-limit or quota error. Quota exhaustion pauses calls and scrolls the [same RapidAPI link](https://rapidapi.com/logicione/api/us-stock-etf-prices). A short burst HTTP 429 shows **RATE LIMITED** and a retry message, without a quota-exhaustion notice or long quota pause. Successful responses never show upgrade prompts.
+Quota and rate-limit notices appear only after a real error. Quota exhaustion pauses calls and scrolls the [RapidAPI link](https://rapidapi.com/logicione/api/us-stock-etf-prices). A short burst HTTP 429 shows **RATE LIMITED** and a retry message.
 
 ## Market indices
 
@@ -77,7 +84,7 @@ export PIXLET=/path/to/pixlet
 
 The technical defaults are `https://us-stock-etf-prices.p.rapidapi.com/v1/quotes` and `https://us-stock-etf-prices.p.rapidapi.com/v1/indices`. Requests carry `X-RapidAPI-Key` and `X-RapidAPI-Host`.
 
-For an existing local Tidbyt setup, `push_tidbyt.sh` renders the root `stock_watchlist.star` and pushes the image using your locally supplied settings. Configure `PIXLET`, `STOCKS_APP`, and `STOCKS_CONFIG` for your own paths and keep authentication/device settings outside git. An existing launchd job can invoke that script during market windows; this repository does not install or change a job. The script preserves the next ticker offset and detected plan via the app's `STATE page_offset=<n> plan_limit=<n>` output, updating its local state only after a successful push. `STATE_DIR` can select a separate state directory. Last-good data and scheduling guards across processes require persistent Pixlet caching, such as your own Redis configured through `PIXLET_REDIS_URL`.
+For an existing local Tidbyt setup, `push_tidbyt.sh` renders the root `stock_watchlist.star` and pushes the image using your locally supplied settings. Configure `PIXLET`, `STOCKS_APP`, and `STOCKS_CONFIG` for your own paths and keep authentication/device settings outside git. An existing launchd job can invoke that script during market windows; this repository does not install or change a job. The script preserves the next ticker offset and detected limit via the app's `STATE page_offset=<n> plan_limit=<n>` output, updating its local state only after a successful push. `STATE_DIR` can select a separate state directory. Last-good data and scheduling guards across processes require persistent Pixlet caching, such as your own Redis configured through `PIXLET_REDIS_URL`.
 
 ## Privacy
 
